@@ -23,6 +23,7 @@ module Data.Machine.Type
   , run
   , runMachine
   , encased
+  , awaitStep
 
   -- ** Building machines from plans
   , construct
@@ -84,6 +85,15 @@ runMachine = runIdentity . runMachineT
 encased :: Monad m => Step k o (MachineT m k o) -> MachineT m k o
 encased = MachineT . return
 
+-- | Build an 'Await' step given a continuation that provides
+-- subsequent steps. @awaitStep f sel ff k@ is like applying the
+-- 'Await' constructor directly, but the continuation @k@ is used to
+-- continue the machine. 
+-- 
+-- @awaitStep f sel ff k = Await (k . f) sel (k ff)@
+awaitStep :: (a -> d) -> k' a -> d -> (d -> r) -> Step k' b r
+awaitStep f sel ff k = Await (k . f) sel (k ff)
+
 instance Monad m => Functor (MachineT m k) where
   fmap f (MachineT m) = MachineT (liftM f' m) where
     f' (Yield o xs)    = Yield (f o) (f <$> xs)
@@ -100,6 +110,13 @@ class Appliance k where
 instance (Monad m, Appliance k) => Applicative (MachineT m k) where
   pure = point
   (<*>) = applied
+
+instance Monad m => Monoid (MachineT m k o) where
+  mempty = stopped
+  ma `mappend` mb = MachineT $ runMachineT ma >>= \u -> case u of
+    Stop -> runMachineT mb
+    Yield o k -> return . Yield o $ k <> mb
+    Await f fk ff -> return $ Await ((<> mb) . f) fk (ff <> mb)
 
 {-
 -- TODO

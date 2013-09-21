@@ -57,24 +57,20 @@ wye ma mb m = MachineT $ runMachineT m >>= \v -> case v of
   Await f X ff        -> runMachineT ma >>= \u -> case u of
     Yield a k           -> runMachineT . wye k mb $ f a
     Stop                -> runMachineT $ wye stopped mb ff
-    Await g Refl fg     -> return . Await (\a -> wye (g a) mb $ encased v) X
-                                  . wye fg mb $ encased v
+    Await g Refl fg     -> return $ awaitStep g X fg $ \l -> wye l mb (encased v)
   Await f Y ff        -> runMachineT mb >>= \u -> case u of
     Yield b k           -> runMachineT . wye ma k $ f b
     Stop                -> runMachineT $ wye ma stopped ff
-    Await g Refl fg     -> return . Await (\b -> wye ma (g b) $ encased v) Y
-                                  . wye ma fg $ encased v
+    Await g Refl fg     -> return . awaitStep g Y fg $ flip (wye ma) (encased v)
   Await f Z ff        -> runMachineT ma >>= \u -> case u of
     Yield a k           -> runMachineT . wye k mb . f $ Left a
     Stop                -> runMachineT mb >>= \w -> case w of
       Yield b k           -> runMachineT . wye stopped k . f $ Right b
       Stop                -> runMachineT $ wye stopped stopped ff
-      Await g Refl fg     -> return . Await (\b -> wye stopped (g b) $ encased v) Y
-                                    . wye stopped fg $ encased v
+      Await g Refl fg     -> return $ awaitStep g Y fg $ flip (wye stopped) (encased v)
     Await g Refl fg     -> runMachineT mb >>= \w -> case w of
       Yield b k           -> runMachineT . wye (encased u) k . f $ Right b
-      Stop                -> return . Await (\a -> wye (g a) stopped $ encased v) X
-                                    . wye fg stopped $ encased v
+      Stop                -> return $ awaitStep g X fg $ \l -> wye l stopped (encased v)
       Await h Refl fh     -> return . Await (\c -> case c of
                                                   Left a  -> wye (g a) (encased w) $ encased v
                                                   Right b -> wye (encased u) (h b) $ encased v) Z

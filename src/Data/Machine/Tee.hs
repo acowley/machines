@@ -49,13 +49,11 @@ tee ma mb m = MachineT $ runMachineT m >>= \v -> case v of
   Await f L ff -> runMachineT ma >>= \u -> case u of
     Stop            -> runMachineT $ tee stopped mb ff
     Yield a k       -> runMachineT $ tee k mb $ f a
-    Await g Refl fg ->
-      return $ Await (\a -> tee (g a) mb $ encased v) L $ tee fg mb $ encased v
+    Await g Refl fg -> return $ awaitStep g L fg $ \l -> tee l mb (encased v)
   Await f R ff -> runMachineT mb >>= \u -> case u of
     Stop            -> runMachineT $ tee ma stopped ff
     Yield b k       -> runMachineT $ tee ma k $ f b
-    Await g Refl fg ->
-      return $ Await (\b -> tee ma (g b) $ encased v) R $ tee ma fg $ encased v
+    Await g Refl fg -> return $ awaitStep g R fg $ flip (tee ma) (encased v)
 
 -- | Precompose a pipe onto the left input of a tee.
 addL :: Monad m => ProcessT m a b -> TeeT m b c d -> TeeT m a c d

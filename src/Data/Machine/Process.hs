@@ -32,16 +32,22 @@ module Data.Machine.Process
   , buffered
   , fold
   , scan
+  , signalEnd
+  , guarded
+  , parts
+  , echoOut
+  , yieldRights
   ) where
 
 import Control.Applicative
 import Control.Category
 import Control.Monad (liftM, when, replicateM_)
+import Control.Monad.IO.Class
 import Data.Foldable hiding (fold)
 import Data.Machine.Is
 import Data.Machine.Plan
 import Data.Machine.Type
-import Prelude hiding ((.),id)
+import Prelude hiding ((.), id, mapM_)
 
 infixr 9 <~
 infixl 9 ~>
@@ -186,3 +192,38 @@ fold func seed = construct $ go seed where
   go cur = do
     next <- await <|> yield cur *> stop
     go (func cur next)
+
+-- | Pass values from upstream to downstream wrapping them in
+-- 'Just'. When upstream has stopped, yields a single 'Nothing'.
+signalEnd :: Process a (Maybe a)
+signalEnd = construct go
+  where go = await >>= yield . Just >> go <|> yield Nothing
+
+-- | If upstream is drained, stop. Otherwise continue with the given
+-- 'ProcessT'. This can help when iterating a process on input chunks,
+-- or transitioning to a process that always succeeds (i.e. won't stop
+-- on a failed await).
+guarded :: Monad m => ProcessT m a b -> ProcessT m a b
+guarded snk = MachineT . return $ Await go Refl stopped
+  where go x = MachineT $ runMachineT snk >>= \v -> case v of
+          Stop -> return Stop
+          Await f Refl _ -> runMachineT $ f x
+          Yield o k -> return $ Yield o (construct (yield x) ~> k)
+
+-- | Break down a 'Foldable' into its constituent elements and feed
+-- them downstream individually.
+parts :: Foldable f => Process (f a) a
+parts = repeatedly $ await >>= mapM_ yield . toList
+
+-- | Pass through each item from upstream while printing it to
+-- standard out.
+echoOut :: Show a => ProcessT IO a a
+echoOut = repeatedly $ do x <- await 
+                          liftIO $ putStrLn (show x)
+                          yield x
+
+-- | Yield only those values received from upstream that have been
+-- tagged with 'Right'
+yieldRights :: Process (Either a b) b
+yieldRights = construct go
+  where go = await >>= either (const go) (\r -> yield r >> go)

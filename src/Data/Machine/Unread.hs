@@ -102,24 +102,6 @@ unreadable = unreadableTo ((~>) . prepended) id
 -- | Provide a switching machine with push-back. The user provides a
 -- handler for yielded values allows for switching to a new
 -- 'ProcessT'. When switching to the new 'ProcessT', any leftovers are
--- drained downstream to the new process.
-unreadableSwitch :: Monad m
-                 => MachineT m (Unread a) (Either (ProcessT m a b) b)
-                 -> ProcessT m a b
-unreadableSwitch ma0 = go S.empty ma0
-  where go q ma = MachineT $ runMachineT ma >>= \v -> case v of
-          Stop -> return Stop
-          Yield (Left k) _ -> runMachineT $ prepended q ~> k
-          Yield (Right o) k -> return . Yield o $ go q k
-          Await f Read ff -> 
-            case viewl q of
-              EmptyL -> return $ Await (\a -> go q (f a)) Refl (go q ff)
-              u :< q' -> runMachineT $ go q' (f u)
-          Await f (Unread u) _ -> runMachineT $ go (q |> u) (f ())
-
--- | Provide a switching machine with push-back. The user provides a
--- handler for yielded values allows for switching to a new
--- 'ProcessT'. When switching to the new 'ProcessT', any leftovers are
 -- drained downstream to the new process. The first two arguments
 -- provide a mechanism for the downstream input language to masquerade
 -- as 'Is'. Specifically, a method to feed leftover values to the new
@@ -141,6 +123,16 @@ unreadableSwitchTo prep refl ma0 = go S.empty ma0
               EmptyL -> return $ Await (\a -> go q (f a)) (refl Refl) (go q ff)
               u :< q' -> runMachineT $ go q' (f u)
           Await f (Unread u) _ -> runMachineT $ go (q |> u) (f ())
+
+-- | Provide a switching machine with push-back. The user provides a
+-- handler for yielded values allows for switching to a new
+-- 'ProcessT'. When switching to the new 'ProcessT', any leftovers are
+-- drained downstream to the new process.
+unreadableSwitch :: Monad m
+                 => MachineT m (Unread a) (Either (ProcessT m a b) b)
+                 -> ProcessT m a b
+unreadableSwitch = unreadableSwitchTo ((~>) . prepended) id
+
 {-
 -- TODO: Is this worth having?
 

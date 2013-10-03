@@ -206,7 +206,8 @@ repeatedly m = r where
     (\f k g -> return (Await (MachineT . f) k (MachineT g)))
     (return Stop)
 
--- | Evaluate a machine until it stops, and then yield answers according to the supplied model.
+-- | @before m p@ builds and evaluates a machine based on @p@ until it
+-- stops, then yields answers according to @m@.
 before :: Monad m => MachineT m k o -> PlanT k o m a -> MachineT m k o
 before (MachineT n) m = MachineT $ runPlanT m
   (const n)

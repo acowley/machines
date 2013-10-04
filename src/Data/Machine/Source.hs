@@ -19,9 +19,16 @@ module Data.Machine.Source
   , repeated
   , cycled
   , cap
+  -- * Sources from IO
+  , sourceIO
+  , sourceFeed
+  , sourceFeed_
   ) where
 
 import Control.Category
+import Control.Concurrent.MVar
+import Control.Monad (void, when)
+import Control.Monad.IO.Class
 import Data.Foldable
 import Data.Machine.Plan
 import Data.Machine.Type
@@ -60,3 +67,27 @@ source xs = construct (traverse_ yield xs)
 --
 cap :: Process a b -> Source a -> Source b
 cap l r = l <~ r
+
+-- | Create a 'SourceT' from the results of repeatedly running an 'IO'
+-- action.
+sourceIO :: MonadIO m => IO a -> SourceT m a
+sourceIO m = repeatedly $ liftIO m >>= yield
+
+-- | Provide a function that pushes values into a 'SourceT'. The
+-- function will block until the source has been able to feed the
+-- previous value downstream.
+sourceFeed :: (MonadIO m, MonadIO n) => m (a -> m (), MachineT n k a)
+sourceFeed = do mv <- liftIO newEmptyMVar
+                let src = liftIO (takeMVar mv) >>= yield
+                return (liftIO . putMVar mv, repeatedly src)
+
+-- | Provide a function that pushes values into a 'SourceT'. The
+-- function will not block. Instead, there is an effective one-element
+-- buffer between the provided function and the source: as soon as
+-- downstream awaits, the most recent value is yielded.
+sourceFeed_ :: (MonadIO m, MonadIO n) => m (a -> m (), MachineT n k a)
+sourceFeed_ = do mv <- liftIO newEmptyMVar
+                 let src = liftIO (takeMVar mv) >>= yield
+                 return (liftIO . putMVar' mv, repeatedly src)
+  where putMVar' mv a = do ok <- tryPutMVar mv a
+                           when (not ok) (void $ swapMVar mv a)

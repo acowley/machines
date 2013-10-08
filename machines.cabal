@@ -44,6 +44,7 @@ library
     pointed           >= 3,
     profunctors       >= 3,
     semigroups        >= 0.8.3,
+    time              >= 1.4,
     transformers      == 0.3.*,
     transformers-base >= 0.4,
     mtl               >= 2 && < 2.2
@@ -60,6 +61,7 @@ library
     Data.Machine.Moore
     Data.Machine.Plan
     Data.Machine.Process
+    Data.Machine.Regulated
     Data.Machine.Source
     Data.Machine.Tee
     Data.Machine.Type

@@ -217,7 +217,7 @@ parts = repeatedly $ await >>= mapM_ yield . toList
 
 -- | Pass through each item from upstream while printing it to
 -- standard out.
-echoOut :: Show a => ProcessT IO a a
+echoOut :: (Show a, MonadIO m) => ProcessT m a a
 echoOut = repeatedly $ do x <- await 
                           liftIO $ putStrLn (show x)
                           yield x

@@ -7,7 +7,7 @@ module Data.Machine.Concurrent (module Data.Machine,
                                 bufferConnect, rollingConnect,
                                 mediatedConnect, BufferRoom(..),
                                 -- * Concurrent multiple-input machines
-                                wye, tee, scatter) where
+                                wye, tee, scatter, splitEnds) where
 import Control.Concurrent.Async.Lifted
 import Control.Monad.Trans.Control
 import Data.Machine hiding (tee, wye)

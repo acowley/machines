@@ -1,8 +1,9 @@
-{-# LANGUAGE FlexibleContexts, GADTs, TupleSections #-}
+{-# LANGUAGE FlexibleContexts, GADTs, TupleSections, RankNTypes #-}
 -- | Routing for splitting and merging processing pipelines.
-module Data.Machine.Concurrent.Scatter (scatter, splitEnds) where
+module Data.Machine.Concurrent.Scatter (scatter, splitSum, splitProd) where
+import Control.Arrow ((***))
 import Control.Concurrent.Async (Async, waitAny)
-import Control.Concurrent.Async.Lifted (waitEither, wait)
+import Control.Concurrent.Async.Lifted (wait, waitEither, waitBoth)
 import Control.Monad ((>=>))
 import Control.Monad.Base (liftBase)
 import Control.Monad.Trans.Control (MonadBaseControl, restoreM, StM)
@@ -64,7 +65,7 @@ scatter sinks = MachineT $ mapM asyncRun sinks
 -- other is allowed to run until it stops or the upstream source
 -- yields a value the remaining consumer can not handle.
 --
--- @splitEnds source sinkL sinkR@ produces a topology like this,
+-- @splitSum sinkL sinkR@ produces a topology like this,
 --
 -- @
 --                                 sinkL
@@ -73,70 +74,106 @@ scatter sinks = MachineT $ mapM asyncRun sinks
 --                             /            \
 --    source -- Either a b -->                -- r -->
 --                             \            /
---                               b         /
---                                \      /
+--                              b          /
+--                               \       /
 --                                 sinkR 
 -- @
-splitEnds :: MonadBaseControl IO m
-          => MachineT m k (Either a b)
-          -> ProcessT m a r -> ProcessT m b r
-          -> MachineT m k r
-splitEnds m snkL snkR = MachineT $ do al <- asyncRun snkL
-                                      ar <- asyncRun snkR
-                                      go m al ar
-  where go src al ar = waitEither al ar >>= go' src al ar
-        go' src al ar step = case step of
-          Left Stop -> wait ar >>= runMachineT . rightOnly src . encased
-          Right Stop -> wait al >>= runMachineT . leftOnly src . encased
+splitSum :: MonadBaseControl IO m
+         => ProcessT m a r -> ProcessT m b r -> ProcessT m (Either a b) r
+splitSum snkL snkR = MachineT $ do sl <- asyncRun snkL
+                                   sr <- asyncRun snkR
+                                   go sl sr
+  where go :: MonadBaseControl IO m
+           => AsyncStep m (Is a) r
+           -> AsyncStep m (Is b) r
+           -> m (MachineStep m (Is (Either a b)) r)
+        go sl sr = waitEither sl sr >>= \s -> case s of
+          Left Stop -> wait sr >>= runMachineT . rightOnly . encased
+          Right Stop -> wait sl >>= runMachineT . leftOnly . encased
 
           Left (Yield o k) -> 
-            return . Yield o . MachineT $ asyncRun k >>= flip (go src) ar
-          Right (Yield o k) ->
-            return . Yield o . MachineT $ asyncRun k >>= go src al
+            return . Yield o . MachineT $ asyncRun k >>= flip go sr
+          Right (Yield o k) -> 
+            return . Yield o . MachineT $ asyncRun k >>= go sl
+                               
+          Left (Await f Refl ff) ->
+            return $ 
+            Await (\u -> case u of
+                           Left a -> MachineT $ asyncRun (f a) >>= flip go sr
+                           Right b -> MachineT $ 
+                                      wait sr >>= forceFeed (go sl) b . encased)
+                  Refl
+                  (MachineT $ asyncRun ff >>= flip go sr)
+          Right (Await g Refl gg) -> return $
+            Await (\u -> case u of
+                           Left a -> 
+                             MachineT $
+                             wait sl >>= forceFeed (flip go sr) a . encased
+                           Right b -> MachineT $ asyncRun (g b) >>= go sl)
+                  Refl
+                  (MachineT $ asyncRun gg >>= go sl)
 
-          Left (Await f Refl ff) -> runMachineT src >>= \u -> case u of
-            Stop -> asyncRun ff >>= flip (go stopped) ar
-            Yield (Left x) k -> asyncRun (f x) >>= flip (go k) ar
-            Yield (Right _) _ -> wait ar >>= go' (encased u) al ar . Right
-            Await uf uk uu -> 
-              return $ awaitStep uf uk uu (\s -> MachineT $ go s al ar)
-          Right (Await g Refl gg) -> runMachineT src >>= \u -> case u of
-            Stop -> asyncRun gg >>= go stopped al
-            Yield (Left _) _ -> wait al >>= go' (encased u) al ar . Left
-            Yield (Right y) k -> asyncRun (g y) >>= go k al
-            Await uf uk uu ->
-              return $ awaitStep uf uk uu (\s -> MachineT $ go s al ar)
-
--- | We have a sink for the Left output of a source, so we want to
--- keep running it as long as upstream does not yield a Right which we
--- can not handle.
-leftOnly :: Monad m
-         => MachineT m k (Either a b)
-         -> ProcessT m a r
-         -> MachineT m k r
-leftOnly src snk = MachineT $ runMachineT snk >>= \v -> case v of
-  Stop -> return Stop
-  Yield o k -> return . Yield o $ leftOnly src k
-  Await f Refl ff -> runMachineT src >>= \u -> case u of
-    Stop -> runMachineT $ leftOnly stopped ff
-    Yield (Left x) k -> runMachineT $ leftOnly k (f x)
-    Yield (Right _) _ -> runMachineT $ leftOnly (encased u) ff
-    Await uf uk uu -> 
-      return $ awaitStep uf uk uu (flip leftOnly (encased v))
+-- | @forceFeed k x p@ runs machine @p@ until it awaits, at which
+-- point it is fed @x@. The result of that feeding is asynchronously
+-- run, and supplied to the continuation @k@.
+forceFeed :: MonadBaseControl IO m
+          => (AsyncStep m (Is a) b -> m (MachineStep m k b))
+          -> a
+          -> ProcessT m a b
+          -> m (MachineStep m k b)
+forceFeed go x = aux
+  where aux p = runMachineT p >>= \v -> case v of
+          Stop -> asyncRun stopped >>= go
+          Yield o k -> return . Yield o . MachineT $ aux k
+          Await f Refl _ -> asyncRun (f x) >>= go
 
 -- | We have a sink for the Right output of a source, so we want to
 -- keep running it as long as upstream does not yield a Left which we
 -- can not handle.
-rightOnly :: Monad m
-          => MachineT m k (Either a b)
-          -> ProcessT m b r
-          -> MachineT m k r
-rightOnly src snk = MachineT $ runMachineT snk >>= \v -> case v of
-  Stop -> return Stop
-  Yield o k -> return . Yield o $ rightOnly src k
-  Await g Refl gg -> runMachineT src >>= \u -> case u of
-    Stop -> runMachineT $ rightOnly stopped gg
-    Yield (Left _) _ -> runMachineT $ rightOnly (encased u) gg
-    Yield (Right y) k -> runMachineT $ rightOnly k (g y)
-    Await uf uk uu ->
-      return $ awaitStep uf uk uu (flip rightOnly (encased v))
+rightOnly :: Monad m => ProcessT m b r -> ProcessT m (Either a b) r
+rightOnly snk = repeatedly (await >>= either (const stop) yield) ~> snk
+
+-- | We have a sink for the Left output of a source, so we want to
+-- keep running it as long as upstream does not yield a Right which we
+-- can not handle.
+leftOnly :: Monad m => ProcessT m a r -> ProcessT m (Either a b) r
+leftOnly snk = repeatedly (await >>= either yield (const stop)) ~> snk
+
+-- | Connect two processes to the downstream tails of a 'Machine' that
+-- produces tuples. The two downstream consumers are run
+-- concurrently. When one downstream consumer stops, the entire
+-- pipeline is stopped.
+--
+-- @splitProd sink1 sink2@ produces a topology like this,
+--
+-- @
+--                            sink1
+--                           /      \
+--                         a          \
+--                        /            \
+--    source -- (a,b) -->               -- r -->
+--                        \            /
+--                         b         /
+--                           \     /
+--                            sink2 
+-- @
+splitProd :: MonadBaseControl IO m
+          => ProcessT m a r -> ProcessT m b r -> ProcessT m (a,b) r
+splitProd snk1 snk2 = MachineT $ do s1 <- asyncRun snk1
+                                    s2 <- asyncRun snk2
+                                    go s1 s2
+  where go s1 s2 = waitBoth s1 s2 >>= \ss -> case ss of
+          (Stop, _) -> return Stop
+          (_, Stop) -> return Stop
+          (Yield o1 k1, Yield o2 k2) -> 
+            return . Yield o1 . encased $ Yield o2 $ MachineT $
+            do k1' <- asyncRun k1
+               k2' <- asyncRun k2
+               go k1' k2'
+          (Yield o k, _) ->
+            return . Yield o . MachineT $ asyncRun k >>= flip go s2
+          (_, Yield o k) ->
+            return . Yield o . MachineT $ asyncRun k >>= go s1
+          (Await f Refl ff, Await g Refl gg) ->
+            return $ Await (uncurry splitProd . (f***g)) Refl (splitProd ff gg)
+                           

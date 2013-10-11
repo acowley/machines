@@ -34,7 +34,7 @@ module Data.Machine.Process
   , scan
   , signalEnd
   , guarded
-  , parts
+  , supplyParts
   , echoOut
   , yieldRights
   ) where
@@ -212,8 +212,8 @@ guarded snk = MachineT . return $ Await go Refl stopped
 
 -- | Break down a 'Foldable' into its constituent elements and feed
 -- them downstream individually.
-parts :: Foldable f => Process (f a) a
-parts = repeatedly $ await >>= mapM_ yield . toList
+supplyParts :: Foldable f => Process (f a) a
+supplyParts = repeatedly $ await >>= mapM_ yield . toList
 
 -- | Pass through each item from upstream while printing it to
 -- standard out.

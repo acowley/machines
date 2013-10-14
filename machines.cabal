@@ -61,6 +61,7 @@ library
     Data.Machine.Moore
     Data.Machine.Plan
     Data.Machine.Process
+    Data.Machine.Profunctor
     Data.Machine.Regulated
     Data.Machine.Source
     Data.Machine.Tee

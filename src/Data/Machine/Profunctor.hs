@@ -5,12 +5,10 @@
 -- instances determine how to combine 'Process'es that yield at
 -- different rates. For instance, suppose we have
 --
--- @ 
--- p :: Process a b
--- 
--- q :: Process (a,c) (b,c)
--- q = firstP p
--- @
+-- > p :: Process a b
+-- > 
+-- > q :: Process (a,c) (b,c)
+-- > q = firstP p
 --
 -- With arrows or strong profunctors, this operation would feed the
 -- first component of any @(a,c)@ input to the arrow or the

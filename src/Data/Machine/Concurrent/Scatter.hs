@@ -1,6 +1,8 @@
 {-# LANGUAGE FlexibleContexts, GADTs, TupleSections, RankNTypes #-}
 -- | Routing for splitting and merging processing pipelines.
-module Data.Machine.Concurrent.Scatter (scatter, splitSum, splitProd) where
+module Data.Machine.Concurrent.Scatter (
+  scatter, mergeSum, splitSum, splitProd
+  ) where
 import Control.Arrow ((***))
 import Control.Concurrent.Async (Async, waitAny)
 import Control.Concurrent.Async.Lifted (wait, waitEither, waitBoth)
@@ -59,13 +61,16 @@ scatter sinks = MachineT $ mapM asyncRun sinks
                -> m (MachineStep m k o)
         goWait = waitAnyHole . diff >=> uncurry go
 
--- | Connect two processes to the downstream tails of a 'Machine' that
+-- | Similar to 'Control.Arrow.|||': split the input between two
+-- processes and merge their outputs.
+--
+-- Connect two processes to the downstream tails of a 'Machine' that
 -- produces 'Either's. The two downstream consumers are run
 -- concurrently when possible. When one downstream consumer stops, the
 -- other is allowed to run until it stops or the upstream source
 -- yields a value the remaining consumer can not handle.
 --
--- @splitSum sinkL sinkR@ produces a topology like this,
+-- @mergeSum sinkL sinkR@ produces a topology like this,
 --
 -- @
 --                                 sinkL
@@ -78,15 +83,54 @@ scatter sinks = MachineT $ mapM asyncRun sinks
 --                               \       /
 --                                 sinkR 
 -- @
-splitSum :: MonadBaseControl IO m
+mergeSum :: MonadBaseControl IO m
          => ProcessT m a r -> ProcessT m b r -> ProcessT m (Either a b) r
-splitSum snkL snkR = MachineT $ do sl <- asyncRun snkL
+mergeSum snkL snkR = MachineT $ do sl <- asyncRun snkL
                                    sr <- asyncRun snkR
                                    go sl sr
   where go :: MonadBaseControl IO m
            => AsyncStep m (Is a) r
            -> AsyncStep m (Is b) r
            -> m (MachineStep m (Is (Either a b)) r)
+        go sl sr = waitEither sl sr >>= \s -> case s of
+          Left Stop -> wait sr >>= runMachineT . rightOnly . encased
+          Right Stop -> wait sl >>= runMachineT . leftOnly . encased
+
+          Left (Yield o k) -> 
+            return . Yield o . MachineT $ asyncRun k >>= flip go sr
+          Right (Yield o k) -> 
+            return . Yield o . MachineT $ asyncRun k >>= go sl
+                               
+          Left (Await f Refl ff) ->
+            return $ 
+            Await (\u -> case u of
+                           Left a -> MachineT $ asyncRun (f a) >>= flip go sr
+                           Right b -> MachineT $ 
+                                      wait sr >>= forceFeed (go sl) b . encased)
+                  Refl
+                  (MachineT $ asyncRun ff >>= flip go sr)
+          Right (Await g Refl gg) -> return $
+            Await (\u -> case u of
+                           Left a -> 
+                             MachineT $
+                             wait sl >>= forceFeed (flip go sr) a . encased
+                           Right b -> MachineT $ asyncRun (g b) >>= go sl)
+                  Refl
+                  (MachineT $ asyncRun gg >>= go sl)
+
+-- | Similar to 'Control.Arrow.+++': split the input between two
+-- processes, retagging and merging their outputs.
+--
+-- The two processes are run concurrently whenever possible.
+splitSum :: MonadBaseControl IO m
+         => ProcessT m a b -> ProcessT m c d -> ProcessT m (Either a c) (Either b d)
+splitSum snkL snkR = MachineT $ do sl <- asyncRun (fmap Left snkL)
+                                   sr <- asyncRun (fmap Right snkR)
+                                   go sl sr
+  where go :: MonadBaseControl IO m
+           => AsyncStep m (Is a) (Either b d)
+           -> AsyncStep m (Is c) (Either b d)
+           -> m (MachineStep m (Is (Either a c)) (Either b d))
         go sl sr = waitEither sl sr >>= \s -> case s of
           Left Stop -> wait sr >>= runMachineT . rightOnly . encased
           Right Stop -> wait sl >>= runMachineT . leftOnly . encased

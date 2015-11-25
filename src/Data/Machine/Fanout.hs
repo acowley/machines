@@ -4,9 +4,9 @@
 module Data.Machine.Fanout (fanout, fanoutSteps) where
 import Control.Applicative
 import Control.Arrow
-import Control.Monad (foldM)
+import Control.Monad (foldM, (<=<))
 import Data.Machine
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, maybeToList)
 import Data.Monoid
 import Data.Profunctor.Unsafe ((#.))
 import Data.Semigroup (Semigroup(sconcat))
@@ -39,19 +39,48 @@ flushYields = go id
         go rs Stop = return (rs [], Nothing)
         go rs s = return (rs [], Just $ encased s)
 
--- | Share inputs with each of a list of processes in lockstep. Any
--- values yielded by the processes are combined into a single yield
--- from the composite process.
-fanout :: (Functor m, Monad m, Semigroup r)
-       => [ProcessT m a r] -> ProcessT m a r
-fanout xs = encased $ Await (MachineT #. aux) Refl (fanout xs)
+-- Helper for 'fanout' that produces the 'Await' to be shared by every
+-- process.
+fanoutGo :: (Functor m, Monad m, Semigroup r)
+         => [ProcessT m a r] -> ProcessT m a r
+fanoutGo [] = encased Stop
+fanoutGo xs = encased $ Await (MachineT #. aux) Refl (encased Stop)
   where aux y = do (rs,xs') <- mapM (feed y) xs >>= mapAccumLM yields []
-                   let nxt = fanout $ catMaybes xs'
+                   let nxt = fanoutGo $ catMaybes xs'
                    case rs of
                      [] -> runMachineT nxt
                      (r:rs') -> return $ Yield (sconcat $ r :| rs') nxt
         yields rs Stop = return (rs,Nothing)
         yields rs y@Yield{} = first (++ rs) <$> flushYields y
+        yields rs a@Await{} = return (rs, Just $ encased a)
+
+-- | Flushes all the ready-to-go 'Yield's from each of a list of
+-- 'MachineT's. Returns all the available outputs and all the machines
+-- that are yet to stop.
+flushAll :: (Functor m, Monad m) => [MachineT m k o] -> m ([o], [MachineT m k o])
+flushAll = fmap concatFlushes . mapM (flushYields <=< runMachineT)
+  where concatFlushes = mconcat . map (fmap maybeToList)
+
+-- | Share inputs with each of a list of processes in lockstep. Any
+-- values yielded by the processes are combined into a single yield
+-- from the composite process.
+fanout :: (Monad m, Semigroup r) => [ProcessT m a r] -> ProcessT m a r
+fanout = MachineT . (aux <=< flushAll)
+  where aux ([], procs) = runMachineT $ fanoutGo procs
+        aux (o:os, procs) = return $ Yield (sconcat $ o :| os) (fanoutGo procs)
+
+-- Helper for 'fanoutSteps'
+fanoutStepsGo :: (Functor m, Monad m, Monoid r)
+              => [ProcessT m a r] -> ProcessT m a r
+fanoutStepsGo [] = encased Stop
+fanoutStepsGo xs = encased $ Await (MachineT . aux) Refl (encased Stop)
+  where aux y = do (rs,xs') <- mapM (feed y) xs >>= mapAccumLM yields []
+                   let nxt = fanoutStepsGo $ catMaybes xs'
+                   if null rs
+                   then return $ Yield mempty nxt
+                   else return $ Yield (mconcat rs) nxt
+        yields rs Stop = return (rs,Nothing)
+        yields rs y@Yield{} = first (++rs) <$> flushYields y
         yields rs a@Await{} = return (rs, Just $ encased a)
 
 -- | Share inputs with each of a list of processes in lockstep. If
@@ -63,12 +92,7 @@ fanout xs = encased $ Await (MachineT #. aux) Refl (fanout xs)
 -- followed by a 'taking' process.
 fanoutSteps :: (Functor m, Monad m, Monoid r)
             => [ProcessT m a r] -> ProcessT m a r
-fanoutSteps xs = encased $ Await (MachineT . aux) Refl (fanoutSteps xs)
-  where aux y = do (rs,xs') <- mapM (feed y) xs >>= mapAccumLM yields []
-                   let nxt = fanoutSteps $ catMaybes xs'
-                   if null rs
-                   then return $ Yield mempty nxt
-                   else return $ Yield (mconcat rs) nxt
-        yields rs Stop = return (rs,Nothing)
-        yields rs y@Yield{} = first (++rs) <$> flushYields y
-        yields rs a@Await{} = return (rs, Just $ encased a)
+fanoutSteps = MachineT . (aux <=< flushAll)
+  where aux ([], procs) = runMachineT $ fanoutStepsGo procs
+        aux (os@(_:_), procs) = return
+                              $ Yield (mconcat os) (fanoutStepsGo procs)

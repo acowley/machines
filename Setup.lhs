@@ -1,4 +1,4 @@
-#!/usr/bin/runhaskell
+
 \begin{code}
 {-# OPTIONS_GHC -Wall #-}
 module Main (main) where
